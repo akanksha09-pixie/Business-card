@@ -1,0 +1,107 @@
+# JagrukRail — RailSafe AI (Real-data build)
+
+This build is configured around **real operational records**, not seeded/demo incidents.
+
+## What is implemented
+
+- React + Vite command dashboard
+- FastAPI backend
+- MySQL as the source of record
+- Server-side RTSP → MJPEG camera streaming for authorized sources
+- YOLO tracking worker (`backend/detector.py`)
+- Track-zone persistence using a YOLO `track_id`
+- Visible 3-second warning countdown
+- Escalation only while the **same tracked hazard remains inside the zone** for 3 continuous seconds
+- Warning → critical escalation state
+- Officer Action Taken Report with exactly 3 fields
+- Incident history stored in MySQL
+- Officer scorecard calculated from recorded reports
+- No fake station, officer, alert, accuracy, or performance values are inserted
+
+## Architecture
+
+Authorized RTSP camera → OpenCV → YOLO tracking → track-zone check → FastAPI → MySQL → React dashboard
+
+## 1. Database
+
+Run `backend/schema.sql` on a fresh MySQL database.
+
+If you are upgrading the earlier JagrukRail database instead, run `backend/migrate_real_tracking.sql` once.
+
+Add only authorized real records to:
+
+- `stations`
+- `cameras`
+- `officers`
+
+`cameras.rtsp_url` stays server-side. The frontend never receives it.
+
+### Track-zone polygon
+
+`cameras.zone_polygon` is JSON containing image coordinates, for example:
+
+```json
+[[100,420],[1100,420],[1100,700],[100,700]]
+```
+
+Use coordinates matching the camera frame resolution. If `zone_polygon` is NULL, the detector treats the entire frame as the detection zone.
+
+## 2. Backend environment
+
+Copy `backend/.env.example` to `backend/.env` and set:
+
+- `DATABASE_URL`
+- `DETECTOR_SECRET`
+- `YOLO_MODEL_PATH`
+- `DETECTION_CONFIDENCE`
+- optionally `DETECTOR_CAMERA_IDS`
+
+Never commit real RTSP passwords or the detector secret to Git.
+
+## 3. Backend
+
+```bash
+cd backend
+python -m venv .venv
+# Windows: .venv\\Scripts\\activate
+# Linux/macOS: source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+## 4. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+If FastAPI is not on `http://localhost:8000`, create `frontend/.env`:
+
+```env
+VITE_API_URL=http://YOUR_SERVER:8000
+```
+
+## 5. Real YOLO detector
+
+Place your **validated/trained railway hazard model** at the path in `YOLO_MODEL_PATH`.
+
+Then run:
+
+```bash
+cd backend
+python detector.py
+```
+
+The worker obtains authorized camera URLs from the private FastAPI endpoint, runs YOLO tracking, checks the tracked object's center against the configured track-zone polygon, and sends frame-level presence updates to FastAPI.
+
+The backend resets `track_entered_at` when a track leaves the zone or stops being seen. Therefore the 3-second escalation is based on continuous persistence, rather than simply waiting three seconds after an alert record was created.
+
+## Important operational notes
+
+1. **YOLO classes:** the included worker recognizes generic labels such as `person`, `animal`, `vehicle`, `object`, and `intruder`. Change the class mapping to match the classes actually trained in your model.
+2. **Camera playback:** the backend opens RTSP and serves MJPEG to the browser. This is suitable for a controlled prototype; production railway deployments should use an approved video gateway/WebRTC architecture.
+3. **Physical lights/siren:** the dashboard records escalation state, but it does not directly drive railway hardware. Any real actuator must be integrated through an authorized safety-approved controller/gateway.
+4. **Accidents prevented:** the scorecard currently reports resolved hazards. A verified “accident/collision prevented” metric requires evidence of train movement/arrival or another approved operational source.
+5. **Safety:** do not connect this prototype directly to signalling, interlocking, train-control, or other safety-critical railway systems without the required authorization, validation, redundancy, and human procedures.
